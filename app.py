@@ -1,7 +1,7 @@
 """
-AI Emotion Recognition Web App (OpenCV DNN + FER+ ONNX)
+AI Emotion Recognition Web App (OpenCV DNN Face Detector + FER+ ONNX)
 Author: Mohsin Atta
-Cloud-ready Streamlit application supporting browser webcam capture and image uploads.
+Cloud-proof architecture: Uses cv2.dnn + pure NumPy/Pillow (Zero CascadeClassifier dependency).
 """
 from __future__ import annotations
 
@@ -27,23 +27,30 @@ if __name__ == "__main__":
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import streamlit as st
 
-# ───────────────────────────── 1. CONFIG & STYLING ─────────────────────────────
-MODEL_URL = "https://huggingface.co/onnxmodelzoo/emotion-ferplus-8/resolve/main/emotion-ferplus-8.onnx"
-MODEL_FILENAME = "emotion-ferplus-8.onnx"
+# ───────────────────────────── 1. CONFIG & MODEL URLS ─────────────────────────────
+EMO_MODEL_URL = "https://huggingface.co/onnxmodelzoo/emotion-ferplus-8/resolve/main/emotion-ferplus-8.onnx"
+EMO_MODEL_FILE = "emotion-ferplus-8.onnx"
+
+FACE_PROTO_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
+FACE_PROTO_FILE = "deploy.prototxt"
+
+FACE_MODEL_URL = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel"
+FACE_MODEL_FILE = "res10_300x300_ssd_iter_140000.caffemodel"
+
 EMOTIONS = ["Neutral", "Happy", "Surprise", "Sad", "Angry", "Disgust", "Fear", "Contempt"]
 
 EMOTION_META = {
-    "Happy":    {"emoji": "😊", "hex": "#10b981", "bgr": (129, 185, 16)},
-    "Surprise": {"emoji": "😲", "hex": "#38bdf8", "bgr": (248, 189, 56)},
-    "Neutral":  {"emoji": "😐", "hex": "#94a3b8", "bgr": (200, 200, 200)},
-    "Sad":      {"emoji": "😢", "hex": "#6366f1", "bgr": (241, 102, 99)},
-    "Angry":    {"emoji": "😠", "hex": "#f43f5e", "bgr": (94, 63, 244)},
-    "Disgust":  {"emoji": "🤢", "hex": "#a855f7", "bgr": (247, 85, 168)},
-    "Fear":     {"emoji": "😨", "hex": "#f59e0b", "bgr": (11, 158, 245)},
-    "Contempt": {"emoji": "😏", "hex": "#ec4899", "bgr": (153, 72, 236)},
+    "Happy":    {"emoji": "😊", "hex": "#10b981", "rgb": (16, 185, 129)},
+    "Surprise": {"emoji": "😲", "hex": "#38bdf8", "rgb": (56, 189, 248)},
+    "Neutral":  {"emoji": "😐", "hex": "#94a3b8", "rgb": (148, 163, 184)},
+    "Sad":      {"emoji": "😢", "hex": "#6366f1", "rgb": (99, 102, 241)},
+    "Angry":    {"emoji": "😠", "hex": "#f43f5e", "rgb": (244, 63, 94)},
+    "Disgust":  {"emoji": "🤢", "hex": "#a855f7", "rgb": (168, 85, 247)},
+    "Fear":     {"emoji": "😨", "hex": "#f59e0b", "rgb": (245, 158, 11)},
+    "Contempt": {"emoji": "😏", "hex": "#ec4899", "rgb": (236, 72, 153)},
 }
 
 st.set_page_config(
@@ -118,9 +125,7 @@ section[data-testid="stSidebar"] {
     margin-bottom: 14px;
     backdrop-filter: blur(14px);
 }
-.emo-row {
-    margin-bottom: 9px;
-}
+.emo-row { margin-bottom: 9px; }
 .emo-label {
     display: flex;
     justify-content: space-between;
@@ -143,19 +148,24 @@ section[data-testid="stSidebar"] {
 """, unsafe_allow_html=True)
 
 
-# ───────────────────────────── 2. MODEL & CV ENGINE ─────────────────────────────
-@st.cache_resource(show_spinner="Downloading & initializing FER+ ONNX model...")
-def load_vision_engine():
-    """Downloads the FER+ ONNX model if missing and loads OpenCV DNN + Haar Cascade."""
-    if not os.path.exists(MODEL_FILENAME):
-        req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as response, open(MODEL_FILENAME, "wb") as out_file:
-            out_file.write(response.read())
+# ───────────────────────────── 2. CLOUD-SAFE DNN ENGINE ─────────────────────────────
+def _download_file(url: str, filename: str) -> None:
+    if not os.path.exists(filename):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as resp, open(filename, "wb") as out:
+            out.write(resp.read())
 
-    net = cv2.dnn.readNetFromONNX(MODEL_FILENAME)
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-    return net, face_cascade
+
+@st.cache_resource(show_spinner="Initializing OpenCV DNN Face & Emotion Models...")
+def load_vision_engine():
+    """Downloads and initializes both the ResNet-10 SSD Face Detector and FER+ ONNX Emotion Model via cv2.dnn."""
+    _download_file(EMO_MODEL_URL, EMO_MODEL_FILE)
+    _download_file(FACE_PROTO_URL, FACE_PROTO_FILE)
+    _download_file(FACE_MODEL_URL, FACE_MODEL_FILE)
+
+    emo_net = cv2.dnn.readNetFromONNX(EMO_MODEL_FILE)
+    face_net = cv2.dnn.readNetFromCaffe(FACE_PROTO_FILE, FACE_MODEL_FILE)
+    return emo_net, face_net
 
 
 def softmax(logits: np.ndarray) -> np.ndarray:
@@ -164,51 +174,84 @@ def softmax(logits: np.ndarray) -> np.ndarray:
     return exp_vals / np.sum(exp_vals)
 
 
-def draw_corner_box(img: np.ndarray, x: int, y: int, w: int, h: int, color: tuple, thickness: int = 2) -> None:
-    """Draws a modern computer-vision bounding box with accented corners."""
-    corner = max(14, int(min(w, h) * 0.18))
-    cv2.rectangle(img, (x, y), (x + w, y + h), color, 1)
+def draw_pil_corner_box(draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int, color: tuple, label: str) -> None:
+    """Draws bounding box, corner accents, and label badge using pure Pillow (no cv2 drawing dependencies)."""
+    w, h = x2 - x1, y2 - y1
+    corner = max(12, int(min(w, h) * 0.18))
+
+    # Main thin box
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+
+    # Highlighted corners
+    lw = 4
     # Top-Left
-    cv2.line(img, (x, y), (x + corner, y), color, thickness + 2)
-    cv2.line(img, (x, y), (x, y + corner), color, thickness + 2)
+    draw.line([(x1, y1), (x1 + corner, y1)], fill=color, width=lw)
+    draw.line([(x1, y1), (x1, y1 + corner)], fill=color, width=lw)
     # Top-Right
-    cv2.line(img, (x + w, y), (x + w - corner, y), color, thickness + 2)
-    cv2.line(img, (x + w, y), (x + w, y + corner), color, thickness + 2)
+    draw.line([(x2 - corner, y1), (x2, y1)], fill=color, width=lw)
+    draw.line([(x2, y1), (x2, y1 + corner)], fill=color, width=lw)
     # Bottom-Left
-    cv2.line(img, (x, y + h), (x + corner, y + h), color, thickness + 2)
-    cv2.line(img, (x, y + h), (x, y + h - corner), color, thickness + 2)
+    draw.line([(x1, y2), (x1 + corner, y2)], fill=color, width=lw)
+    draw.line([(x1, y2 - corner), (x1, y2)], fill=color, width=lw)
     # Bottom-Right
-    cv2.line(img, (x + w, y + h), (x + w - corner, y + h), color, thickness + 2)
-    cv2.line(img, (x + w, y + h), (x + w, y + h - corner), color, thickness + 2)
+    draw.line([(x2 - corner, y2), (x2, y2)], fill=color, width=lw)
+    draw.line([(x2, y2 - corner), (x2, y2)], fill=color, width=lw)
+
+    # Label badge
+    badge_h = 24
+    badge_w = max(110, len(label) * 8 + 16)
+    by1 = max(0, y1 - badge_h - 4)
+    by2 = by1 + badge_h
+    draw.rectangle([x1, by1, x1 + badge_w, by2], fill=color)
+    draw.text((x1 + 8, by1 + 5), label, fill=(10, 15, 25))
 
 
-def analyze_image(pil_img: Image.Image, scale_factor: float, min_neighbors: int):
-    """Detects faces, runs FER+ ONNX inference, and returns annotated image + face telemetry."""
-    net, face_cascade = load_vision_engine()
+def analyze_image(pil_img: Image.Image, conf_threshold: float):
+    """Detects faces via OpenCV DNN SSD and classifies emotions via FER+ ONNX."""
+    emo_net, face_net = load_vision_engine()
 
-    rgb_img = np.array(pil_img.convert("RGB"))
-    bgr_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+    rgb_pil = pil_img.convert("RGB")
+    img_w, img_h = rgb_pil.size
+    rgb_arr = np.array(rgb_pil)
 
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=scale_factor,
-        minNeighbors=min_neighbors,
-        minSize=(40, 40),
-    )
+    # Prepare 300x300 BGR input tensor for SSD Face Detector using pure PIL + NumPy
+    resized_300 = np.array(rgb_pil.resize((300, 300), Image.Resampling.BILINEAR), dtype=np.float32)
+    bgr_300 = resized_300[:, :, ::-1] - np.array([104.0, 177.0, 123.0], dtype=np.float32)
+    face_blob = np.transpose(bgr_300, (2, 0, 1))[np.newaxis, ...]
 
+    face_net.setInput(face_blob)
+    raw_detections = face_net.forward()
+
+    boxes = []
+    for i in range(raw_detections.shape[2]):
+        score = float(raw_detections[0, 0, i, 2])
+        if score >= conf_threshold:
+            box = raw_detections[0, 0, i, 3:7] * np.array([img_w, img_h, img_w, img_h])
+            x1, y1, x2, y2 = box.astype(int)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img_w - 1, x2), min(img_h - 1, y2)
+            if (x2 - x1) > 20 and (y2 - y1) > 20:
+                boxes.append((x1, y1, x2, y2, score))
+
+    # Sort largest faces first
+    boxes.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+
+    annotated_pil = rgb_pil.copy()
+    draw = ImageDraw.Draw(annotated_pil)
     results = []
-    if len(faces) > 0:
-        # Sort faces largest to smallest
-        faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
 
-    for idx, (x, y, w, h) in enumerate(faces):
-        roi_gray = gray[y:y + h, x:x + w]
-        roi_resized = cv2.resize(roi_gray, (64, 64))
+    for idx, (x1, y1, x2, y2, face_score) in enumerate(boxes):
+        face_crop_pil = rgb_pil.crop((x1, y1, x2, y2))
 
-        blob = cv2.dnn.blobFromImage(roi_resized, 1.0, (64, 64), (0, 0, 0), swapRB=False, crop=False)
-        net.setInput(blob)
-        logits = net.forward()[0]
+        # Preprocess 64x64 grayscale tensor (1, 1, 64, 64) for FER+ ONNX
+        gray_64 = np.array(
+            face_crop_pil.convert("L").resize((64, 64), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        )
+        emo_blob = gray_64[np.newaxis, np.newaxis, :, :]
+
+        emo_net.setInput(emo_blob)
+        logits = emo_net.forward()[0]
         probs = softmax(logits)
 
         top_idx = int(np.argmax(probs))
@@ -216,37 +259,27 @@ def analyze_image(pil_img: Image.Image, scale_factor: float, min_neighbors: int)
         conf_pct = float(probs[top_idx] * 100.0)
         meta = EMOTION_META[emotion]
 
-        draw_corner_box(bgr_img, x, y, w, h, meta["bgr"], thickness=2)
+        label = f"#{idx + 1} {emotion} ({conf_pct:.1f}%)"
+        draw_pil_corner_box(draw, x1, y1, x2, y2, meta["rgb"], label)
 
-        label = f"#{idx + 1} {emotion}: {conf_pct:.1f}%"
-        font_scale = max(0.55, min(0.85, w / 220.0))
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
-        label_y = max(y - 8, th + 12)
-        cv2.rectangle(bgr_img, (x, label_y - th - 8), (x + tw + 12, label_y + 4), meta["bgr"], -1)
-        cv2.putText(
-            bgr_img, label, (x + 6, label_y - 2),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (10, 15, 25), 2, cv2.LINE_AA
-        )
-
-        face_crop_rgb = rgb_img[y:y + h, x:x + w]
         results.append({
             "id": idx + 1,
             "emotion": emotion,
             "emoji": meta["emoji"],
             "hex": meta["hex"],
             "confidence": conf_pct,
+            "face_conf": face_score * 100.0,
             "probs": {EMOTIONS[i]: float(probs[i] * 100.0) for i in range(len(EMOTIONS))},
-            "crop": face_crop_rgb,
+            "crop": np.array(face_crop_pil),
         })
 
-    annotated_rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-    return annotated_rgb, results
+    return np.array(annotated_pil), results
 
 
 # ───────────────────────────── 3. SIDEBAR CONTROLS ─────────────────────────────
 with st.sidebar:
     st.markdown("### 🧠 FER+ Vision Engine")
-    st.caption("Lightweight OpenCV DNN + ONNX Runtime (Zero PyTorch/TensorFlow overhead)")
+    st.caption("100% OpenCV DNN (`cv2.dnn`) + ONNX Runtime")
 
     input_mode = st.radio(
         "Select Input Source",
@@ -255,16 +288,11 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("#### ⚙️ Detection Sensitivity")
-    scale_factor = st.slider(
-        "Scale Factor",
-        min_value=1.05, max_value=1.40, value=1.10, step=0.05,
-        help="Lower values detect more faces but run slightly slower.",
-    )
-    min_neighbors = st.slider(
-        "Min Neighbors (Strictness)",
-        min_value=3, max_value=10, value=5, step=1,
-        help="Higher values reduce false positives.",
+    st.markdown("#### ⚙️ DNN Face Detector Settings")
+    conf_threshold = st.slider(
+        "Face Confidence Threshold",
+        min_value=0.25, max_value=0.90, value=0.50, step=0.05,
+        help="Minimum confidence required by the ResNet-10 SSD model to detect a face.",
     )
 
     st.markdown("---")
@@ -279,9 +307,9 @@ st.markdown("""
 <div class="hero-banner">
     <div>
         <h1 class="hero-title">🧠 Real-Time AI Emotion Recognition</h1>
-        <p class="hero-sub">OpenCV Deep Neural Network (cv2.dnn) • Pre-Trained FER+ ONNX Model • 8-Class Softmax Telemetry</p>
+        <p class="hero-sub">ResNet-10 SSD Face Detector • Pre-Trained FER+ ONNX Model • 8-Class Softmax Telemetry</p>
     </div>
-    <div class="badge-pill">⚡ ONNX Engine Active</div>
+    <div class="badge-pill">⚡ Dual DNN Engine Active</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -297,7 +325,7 @@ else:
         source_image = Image.open(up_buf)
 
 if source_image is not None:
-    annotated_img, detections = analyze_image(source_image, scale_factor, min_neighbors)
+    annotated_img, detections = analyze_image(source_image, conf_threshold)
 
     col_img, col_stats = st.columns([1.35, 1], gap="large")
 
@@ -309,7 +337,7 @@ if source_image is not None:
 
     with col_stats:
         if not detections:
-            st.warning("No faces detected in this frame. Try facing the camera directly or lowering 'Min Neighbors' in the sidebar.")
+            st.warning("No faces detected. Try facing the camera directly or lowering the 'Face Confidence Threshold' slider in the sidebar.")
         else:
             for det in detections:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -319,13 +347,12 @@ if source_image is not None:
                 with head_c2:
                     st.markdown(
                         f"<h3 style='margin:0;color:{det['hex']}'>{det['emoji']} {det['emotion']} ({det['confidence']:.1f}%)</h3>"
-                        f"<p style='margin:2px 0 0;color:#94a3b8;font-size:12.5px'>Face #{det['id']} • 64×64 Grayscale ONNX Input</p>",
+                        f"<p style='margin:2px 0 0;color:#94a3b8;font-size:12.5px'>Face #{det['id']} • Detection Confidence: {det['face_conf']:.1f}%</p>",
                         unsafe_allow_html=True,
                     )
 
                 st.markdown("<hr style='border-color:rgba(148,163,184,0.12);margin:12px 0'>", unsafe_allow_html=True)
 
-                # Render 8-Emotion Softmax Probability Bars
                 bars_html = ""
                 sorted_probs = sorted(det["probs"].items(), key=lambda x: x[1], reverse=True)
                 for emo_name, pct in sorted_probs:
